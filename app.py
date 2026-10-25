@@ -14,7 +14,7 @@ st.set_page_config(
     layout="wide"
 )
 
-BASE_DIR = Path(__file__).parent
+BASE_DIR = Path(__file__).resolve().parent
 DATA_FILE = BASE_DIR / "Nassau Candy Distributor.csv"
 OUTPUT_DIR = BASE_DIR / "analysis_outputs"
 
@@ -24,11 +24,17 @@ st.caption("MCA Project | Python • Pandas • Streamlit • Matplotlib")
 
 
 # ==========================================================
-# 2. LOAD DATA
+# 2. LOAD DATA AND REPORTS
 # ==========================================================
 
 @st.cache_data
 def load_data():
+    if not DATA_FILE.exists():
+        raise FileNotFoundError(
+            f"Dataset nahi mili: {DATA_FILE.name}. "
+            "CSV file ko app.py ke saath same folder mein rakho."
+        )
+
     data = pd.read_csv(DATA_FILE)
     data.columns = data.columns.str.strip()
 
@@ -65,9 +71,7 @@ def load_data():
         (data["Cost"] >= 0)
     ].copy()
 
-    data["Gross Margin %"] = (
-        data["Gross Profit"] / data["Sales"] * 100
-    )
+    data["Gross Margin %"] = data["Gross Profit"] / data["Sales"] * 100
     data["Cost Ratio %"] = data["Cost"] / data["Sales"] * 100
     data["Profit Per Unit"] = data["Gross Profit"] / data["Units"]
     data["Order Month"] = data["Order Date"].dt.to_period("M").astype(str)
@@ -75,19 +79,23 @@ def load_data():
     return data
 
 
-@st.cache_data
+# Intentionally not cached: newly uploaded reports should be detected.
 def load_report(filename):
     path = OUTPUT_DIR / filename
+
     if not path.exists():
-        return None
-    return pd.read_csv(path)
+        return None, f"File missing: {path}"
+
+    try:
+        return pd.read_csv(path), None
+    except Exception as error:
+        return None, f"Could not read {filename}: {error}"
 
 
 try:
     df = load_data()
 except Exception as error:
     st.error(f"Dataset load karne mein problem: {error}")
-    st.info("Check karo ki CSV file aur app.py ek hi project folder mein hain.")
     st.stop()
 
 if df.empty:
@@ -111,7 +119,7 @@ date_range = st.sidebar.date_input(
     max_value=max_date
 )
 
-all_divisions = sorted(df["Division"].unique().tolist())
+all_divisions = sorted(df["Division"].dropna().unique().tolist())
 
 selected_divisions = st.sidebar.multiselect(
     "Select Division",
@@ -163,7 +171,7 @@ if filtered.empty:
 
 
 # ==========================================================
-# 4. SUMMARY TABLES AND METRICS
+# 4. CALCULATE SUMMARY METRICS
 # ==========================================================
 
 total_sales = filtered["Sales"].sum()
@@ -196,15 +204,14 @@ product_data["Profit Per Unit"] = (
 )
 product_data["Revenue Contribution %"] = (
     product_data["Sales"] / product_data["Sales"].sum() * 100
-    if product_data["Sales"].sum() else 0
 )
+profit_denominator = product_data["Gross_Profit"].sum()
 product_data["Profit Contribution %"] = (
-    product_data["Gross_Profit"] / product_data["Gross_Profit"].sum() * 100
-    if product_data["Gross_Profit"].sum() else 0
+    product_data["Gross_Profit"] / profit_denominator * 100
+    if profit_denominator else 0
 )
 product_data["Margin Status"] = product_data["Gross Margin %"].apply(
-    lambda value: "Low Margin" if value < margin_threshold
-    else "At/Above Threshold"
+    lambda x: "Low Margin" if x < margin_threshold else "At/Above Threshold"
 )
 
 product_data["Cost Risk"] = product_data.apply(
@@ -291,19 +298,13 @@ st.markdown("### Monthly Sales and Gross Profit")
 
 monthly = (
     filtered.groupby("Order Month", as_index=False)
-    .agg(
-        Sales=("Sales", "sum"),
-        Gross_Profit=("Gross Profit", "sum")
-    )
+    .agg(Sales=("Sales", "sum"), Gross_Profit=("Gross Profit", "sum"))
     .sort_values("Order Month")
 )
 
 fig, ax = plt.subplots(figsize=(12, 4))
 ax.plot(monthly["Order Month"], monthly["Sales"], marker="o", label="Sales")
-ax.plot(
-    monthly["Order Month"], monthly["Gross_Profit"],
-    marker="o", label="Gross Profit"
-)
+ax.plot(monthly["Order Month"], monthly["Gross_Profit"], marker="o", label="Gross Profit")
 ax.set_ylabel("Amount ($)")
 ax.set_xlabel("Order Month")
 ax.tick_params(axis="x", rotation=45)
@@ -333,7 +334,6 @@ tab1, tab2, tab3, tab4, tab5, tab6 = st.tabs([
 
 with tab1:
     st.markdown("## Product Profitability Overview")
-
     left, right = st.columns(2)
 
     with left:
@@ -361,30 +361,21 @@ with tab1:
     st.markdown("### Complete Product Metrics")
     st.dataframe(
         product_data.sort_values("Gross_Profit", ascending=False).style.format({
-            "Sales": "${:,.2f}",
-            "Cost": "${:,.2f}",
-            "Gross_Profit": "${:,.2f}",
-            "Units": "{:,.0f}",
-            "Gross Margin %": "{:.2f}%",
-            "Cost Ratio %": "{:.2f}%",
+            "Sales": "${:,.2f}", "Cost": "${:,.2f}",
+            "Gross_Profit": "${:,.2f}", "Units": "{:,.0f}",
+            "Gross Margin %": "{:.2f}%", "Cost Ratio %": "{:.2f}%",
             "Profit Per Unit": "${:,.2f}",
             "Revenue Contribution %": "{:.2f}%",
             "Profit Contribution %": "{:.2f}%"
         }),
-        use_container_width=True,
-        hide_index=True
+        width="stretch", hide_index=True
     )
 
     st.markdown("### Sales vs Gross Margin")
     fig, ax = plt.subplots(figsize=(10, 5))
-
     for division_name in sorted(product_data["Division"].unique()):
         subset = product_data[product_data["Division"] == division_name]
-        ax.scatter(
-            subset["Sales"], subset["Gross Margin %"],
-            label=division_name, s=65
-        )
-
+        ax.scatter(subset["Sales"], subset["Gross Margin %"], label=division_name, s=65)
     ax.axhline(margin_threshold, linestyle="--", label="Margin Threshold")
     ax.set_xlabel("Product Sales ($)")
     ax.set_ylabel("Gross Margin (%)")
@@ -411,24 +402,18 @@ with tab1:
             return "High Profit / Low Margin"
         return "Other / Review"
 
-    product_data["Product Classification"] = product_data.apply(
-        classify_product, axis=1
-    )
+    product_data["Product Classification"] = product_data.apply(classify_product, axis=1)
 
     st.markdown("### Product Portfolio Classification")
     st.dataframe(
         product_data[
-            [
-                "Product Name", "Division", "Sales", "Gross_Profit",
-                "Gross Margin %", "Product Classification"
-            ]
+            ["Product Name", "Division", "Sales", "Gross_Profit",
+             "Gross Margin %", "Product Classification"]
         ].sort_values("Gross_Profit", ascending=False).style.format({
-            "Sales": "${:,.2f}",
-            "Gross_Profit": "${:,.2f}",
+            "Sales": "${:,.2f}", "Gross_Profit": "${:,.2f}",
             "Gross Margin %": "{:.2f}%"
         }),
-        use_container_width=True,
-        hide_index=True
+        width="stretch", hide_index=True
     )
 
 
@@ -438,15 +423,12 @@ with tab1:
 
 with tab2:
     st.markdown("## Division Performance Dashboard")
-
     left, right = st.columns(2)
 
     with left:
         st.markdown("### Sales vs Gross Profit")
         fig, ax = plt.subplots(figsize=(7, 4))
-        division_data.plot(
-            x="Division", y=["Sales", "Gross_Profit"], kind="bar", ax=ax
-        )
+        division_data.plot(x="Division", y=["Sales", "Gross_Profit"], kind="bar", ax=ax)
         ax.set_ylabel("Amount ($)")
         ax.tick_params(axis="x", rotation=15)
         fig.tight_layout()
@@ -464,11 +446,8 @@ with tab2:
         plt.close(fig)
 
     st.markdown("### Product Margin Distribution by Division")
-
     box_data = [
-        product_data.loc[
-            product_data["Division"] == div, "Gross Margin %"
-        ].dropna().values
+        product_data.loc[product_data["Division"] == div, "Gross Margin %"].dropna().values
         for div in sorted(product_data["Division"].unique())
     ]
     box_labels = sorted(product_data["Division"].unique())
@@ -484,16 +463,10 @@ with tab2:
 
     st.markdown("### Revenue vs Profit Contribution")
     fig, ax = plt.subplots(figsize=(9, 4))
-    ax.bar(
-        division_data["Division"],
-        division_data["Revenue Contribution %"],
-        label="Revenue Share"
-    )
+    ax.bar(division_data["Division"], division_data["Revenue Contribution %"], label="Revenue Share")
     ax.plot(
-        division_data["Division"],
-        division_data["Profit Contribution %"],
-        marker="o",
-        label="Profit Share"
+        division_data["Division"], division_data["Profit Contribution %"],
+        marker="o", label="Profit Share"
     )
     ax.set_ylabel("Contribution (%)")
     ax.legend()
@@ -503,18 +476,14 @@ with tab2:
 
     st.dataframe(
         division_data.style.format({
-            "Sales": "${:,.2f}",
-            "Cost": "${:,.2f}",
-            "Gross_Profit": "${:,.2f}",
-            "Units": "{:,.0f}",
-            "Gross Margin %": "{:.2f}%",
-            "Cost Ratio %": "{:.2f}%",
+            "Sales": "${:,.2f}", "Cost": "${:,.2f}",
+            "Gross_Profit": "${:,.2f}", "Units": "{:,.0f}",
+            "Gross Margin %": "{:.2f}%", "Cost Ratio %": "{:.2f}%",
             "Revenue Contribution %": "{:.2f}%",
             "Profit Contribution %": "{:.2f}%",
             "Revenue-Profit Share Gap (pp)": "{:.2f}"
         }),
-        use_container_width=True,
-        hide_index=True
+        width="stretch", hide_index=True
     )
 
 
@@ -524,10 +493,7 @@ with tab2:
 
 with tab3:
     st.markdown("## Cost vs Margin Diagnostics")
-
-    st.caption(
-        "Cost-sales relationship apne aap pricing inefficiency prove nahi karta."
-    )
+    st.caption("Cost-sales relationship apne aap pricing inefficiency prove nahi karta.")
 
     fig, ax = plt.subplots(figsize=(9, 5))
     ax.scatter(product_data["Sales"], product_data["Cost"], s=70)
@@ -541,9 +507,7 @@ with tab3:
 
     st.markdown("### Cost Ratio vs Gross Margin")
     fig, ax = plt.subplots(figsize=(9, 5))
-    ax.scatter(
-        product_data["Cost Ratio %"], product_data["Gross Margin %"], s=75
-    )
+    ax.scatter(product_data["Cost Ratio %"], product_data["Gross Margin %"], s=75)
     ax.axhline(margin_threshold, linestyle="--", label="Margin Threshold")
     ax.axvline(70, linestyle=":", label="70% Cost Ratio")
     ax.set_xlabel("Cost Ratio (%)")
@@ -554,7 +518,6 @@ with tab3:
     plt.close(fig)
 
     st.markdown("### Products for Cost / Pricing Review")
-
     risk_data = product_data[
         (product_data["Gross Margin %"] < margin_threshold) |
         (product_data["Cost Ratio %"] >= 70)
@@ -566,36 +529,26 @@ with tab3:
         st.warning(f"{len(risk_data)} product(s) review rules se flag hue.")
         st.dataframe(
             risk_data[
-                [
-                    "Product Name", "Division", "Sales", "Cost",
-                    "Gross_Profit", "Gross Margin %", "Cost Ratio %",
-                    "Profit Per Unit", "Cost Risk"
-                ]
+                ["Product Name", "Division", "Sales", "Cost", "Gross_Profit",
+                 "Gross Margin %", "Cost Ratio %", "Profit Per Unit", "Cost Risk"]
             ].sort_values("Gross Margin %").style.format({
-                "Sales": "${:,.2f}",
-                "Cost": "${:,.2f}",
+                "Sales": "${:,.2f}", "Cost": "${:,.2f}",
                 "Gross_Profit": "${:,.2f}",
-                "Gross Margin %": "{:.2f}%",
-                "Cost Ratio %": "{:.2f}%",
+                "Gross Margin %": "{:.2f}%", "Cost Ratio %": "{:.2f}%",
                 "Profit Per Unit": "${:,.2f}"
             }),
-            use_container_width=True,
-            hide_index=True
+            width="stretch", hide_index=True
         )
 
     st.info(
-        "Review flags investigation ke liye hain. Pricing ya discontinuation "
-        "se pehle supplier costs, discounts, demand aur product strategy verify karein."
+        "Review flags investigation ke liye hain. Pricing ya discontinuation se pehle "
+        "supplier costs, discounts, demand aur product strategy verify karein."
     )
 
     st.markdown("### Monthly Gross Margin Volatility")
-
     monthly_product = (
         filtered.groupby(["Order Month", "Product Name"], as_index=False)
-        .agg(
-            Sales=("Sales", "sum"),
-            Gross_Profit=("Gross Profit", "sum")
-        )
+        .agg(Sales=("Sales", "sum"), Gross_Profit=("Gross Profit", "sum"))
     )
     monthly_product["Gross Margin %"] = (
         monthly_product["Gross_Profit"] / monthly_product["Sales"] * 100
@@ -606,33 +559,22 @@ with tab3:
         .agg(["std", "mean", "min", "max", "count"])
         .reset_index()
         .rename(columns={
-            "std": "Margin Volatility (pp)",
-            "mean": "Average Margin %",
-            "min": "Minimum Margin %",
-            "max": "Maximum Margin %",
+            "std": "Margin Volatility (pp)", "mean": "Average Margin %",
+            "min": "Minimum Margin %", "max": "Maximum Margin %",
             "count": "Months Observed"
         })
     )
-
     volatility = volatility[
         volatility["Months Observed"] >= 2
     ].dropna(subset=["Margin Volatility (pp)"])
 
     if volatility.empty:
-        st.info(
-            "Selected range mein volatility calculate karne ke liye "
-            "kisi product ke kam-se-kam do monthly observations nahi mile."
-        )
+        st.info("Selected range mein volatility calculate karne ke liye kisi product ke kam-se-kam do monthly observations nahi mile.")
     else:
-        volatility = volatility.sort_values(
-            "Margin Volatility (pp)", ascending=False
-        )
+        volatility = volatility.sort_values("Margin Volatility (pp)", ascending=False)
         chart_data = volatility.head(10).sort_values("Margin Volatility (pp)")
-
         fig, ax = plt.subplots(figsize=(9, 5))
-        ax.barh(
-            chart_data["Product Name"], chart_data["Margin Volatility (pp)"]
-        )
+        ax.barh(chart_data["Product Name"], chart_data["Margin Volatility (pp)"])
         ax.set_xlabel("Standard Deviation (percentage points)")
         fig.tight_layout()
         st.pyplot(fig)
@@ -645,8 +587,7 @@ with tab3:
                 "Minimum Margin %": "{:.2f}%",
                 "Maximum Margin %": "{:.2f}%"
             }),
-            use_container_width=True,
-            hide_index=True
+            width="stretch", hide_index=True
         )
 
 
@@ -667,15 +608,9 @@ with tab4:
 
         pareto["Contribution %"] = pareto[metric_col] / total * 100
         pareto["Cumulative %"] = pareto["Contribution %"].cumsum()
+        count_to_80 = min(int((pareto["Cumulative %"] < 80).sum()) + 1, len(pareto))
 
-        count_to_80 = min(
-            int((pareto["Cumulative %"] < 80).sum()) + 1,
-            len(pareto)
-        )
-        st.metric(
-            f"Products needed for 80% of {title}",
-            f"{count_to_80} of {len(pareto)}"
-        )
+        st.metric(f"Products needed for 80% of {title}", f"{count_to_80} of {len(pareto)}")
 
         fig, ax1 = plt.subplots(figsize=(11, 5))
         ax1.bar(pareto["Product Name"], pareto[metric_col])
@@ -684,9 +619,7 @@ with tab4:
         ax1.tick_params(axis="x", rotation=65)
 
         ax2 = ax1.twinx()
-        ax2.plot(
-            range(len(pareto)), pareto["Cumulative %"], marker="o"
-        )
+        ax2.plot(range(len(pareto)), pareto["Cumulative %"], marker="o")
         ax2.axhline(80, linestyle="--", label="80% Threshold")
         ax2.set_ylabel("Cumulative Contribution (%)")
         ax2.set_ylim(0, 105)
@@ -699,17 +632,13 @@ with tab4:
 
         st.dataframe(
             pareto[
-                [
-                    "Product Name", "Division", metric_col,
-                    "Contribution %", "Cumulative %"
-                ]
+                ["Product Name", "Division", metric_col, "Contribution %", "Cumulative %"]
             ].style.format({
                 metric_col: "${:,.2f}",
                 "Contribution %": "{:.2f}%",
                 "Cumulative %": "{:.2f}%"
             }),
-            use_container_width=True,
-            hide_index=True
+            width="stretch", hide_index=True
         )
 
     left, right = st.columns(2)
@@ -720,7 +649,6 @@ with tab4:
 
     st.divider()
     st.markdown("### State Revenue Concentration")
-
     top_states = state_data.head(10).sort_values("Sales")
     fig, ax = plt.subplots(figsize=(9, 5))
     ax.barh(top_states["State/Province"], top_states["Sales"])
@@ -731,16 +659,13 @@ with tab4:
 
     st.dataframe(
         state_data.style.format({
-            "Sales": "${:,.2f}",
-            "Gross_Profit": "${:,.2f}",
+            "Sales": "${:,.2f}", "Gross_Profit": "${:,.2f}",
             "Revenue Contribution %": "{:.2f}%"
         }),
-        use_container_width=True,
-        hide_index=True
+        width="stretch", hide_index=True
     )
 
     st.markdown("### Region Revenue Concentration")
-
     fig, ax = plt.subplots(figsize=(8, 4))
     ax.bar(region_data["Region"], region_data["Revenue Contribution %"])
     ax.set_ylabel("Revenue Contribution (%)")
@@ -750,17 +675,15 @@ with tab4:
 
     st.dataframe(
         region_data.style.format({
-            "Sales": "${:,.2f}",
-            "Gross_Profit": "${:,.2f}",
+            "Sales": "${:,.2f}", "Gross_Profit": "${:,.2f}",
             "Revenue Contribution %": "{:.2f}%"
         }),
-        use_container_width=True,
-        hide_index=True
+        width="stretch", hide_index=True
     )
 
     st.caption(
-        "State/region revenue share sales concentration dikhata hai, delivery "
-        "congestion nahi. Logistics conclusions ke liye validated data chahiye."
+        "State/region revenue share sales concentration dikhata hai, delivery congestion nahi. "
+        "Logistics conclusions ke liye validated data chahiye."
     )
 
 
@@ -772,57 +695,96 @@ with tab5:
     st.markdown("## Factory Performance Dashboard")
     st.write(
         "Factory performance supplied product-to-factory mapping par based hai. "
-        "Factory-wise results mapping report se load hote hain."
+        "Factory-wise results mapping reports se load hote hain."
     )
 
-    factory_summary = load_report("factory_performance.csv")
-    factory_products = load_report("factory_product_performance.csv")
-    factory_mapping = load_report("factory_product_mapping.csv")
-    unmatched_products = load_report("unmatched_factory_products.csv")
-    coverage = load_report("factory_mapping_coverage.csv")
+    required_factory_reports = {
+        "factory_performance.csv": "Factory summary",
+        "factory_product_performance.csv": "Product-level factory performance",
+        "factory_product_mapping.csv": "Product-to-factory mapping",
+        "unmatched_factory_products.csv": "Unmatched products",
+        "factory_mapping_coverage.csv": "Mapping coverage"
+    }
+
+    reports = {}
+    report_errors = []
+
+    for filename, description in required_factory_reports.items():
+        reports[filename], error = load_report(filename)
+        if error:
+            report_errors.append(f"{description}: {error}")
+
+    factory_summary = reports["factory_performance.csv"]
+    factory_products = reports["factory_product_performance.csv"]
+    factory_mapping = reports["factory_product_mapping.csv"]
+    unmatched_products = reports["unmatched_factory_products.csv"]
+    coverage = reports["factory_mapping_coverage.csv"]
+
+    if report_errors:
+        st.error("Factory reports load karne mein dikkat hai:")
+        for message in report_errors:
+            st.write(f"- {message}")
+
+        st.info(
+            "GitHub repository ke root mein app.py aur dataset rakho. "
+            "Factory CSV files analysis_outputs folder ke andar honi chahiye. "
+            "Filename aur capitalisation bilkul match honi chahiye."
+        )
 
     if factory_summary is None or factory_products is None:
         st.warning(
-            "Factory reports nahi mile. Pehle VS Code terminal mein "
-            "`python factory_analysis.py` run karo, phir dashboard rerun karo."
+            "Factory summary ya product performance report missing hai. "
+            "Upar dikhayi gayi exact file error ko check karo."
         )
     else:
-        # Filter factories to the products selected in the main dashboard
-        visible_product_names = set(filtered["Product Name"].astype(str).str.strip())
-        visible_factory_products = factory_products[
-            factory_products["Product Name"].astype(str).str.strip().isin(
-                visible_product_names
-            )
-        ].copy()
+        needed_columns = {
+            "factory_performance.csv": [
+                "Factory", "Sales", "Gross_Profit"
+            ],
+            "factory_product_performance.csv": [
+                "Factory", "Product Name", "Sales", "Gross_Profit"
+            ]
+        }
 
-        if visible_factory_products.empty:
-            st.warning(
-                "Selected filters ke products factory mapping report mein nahi mile."
-            )
+        report_column_errors = []
+        for filename, columns in needed_columns.items():
+            report = reports[filename]
+            if report is not None:
+                missing_cols = [col for col in columns if col not in report.columns]
+                if missing_cols:
+                    report_column_errors.append(
+                        f"{filename} mein columns missing hain: {missing_cols}"
+                    )
+
+        if report_column_errors:
+            for message in report_column_errors:
+                st.error(message)
         else:
-            # Recalculate factory metrics for current date/division/product filters
-            factory_view = (
-                visible_factory_products.groupby(
-                    ["Factory", "Latitude", "Longitude"], as_index=False
-                )
-                .agg(
-                    Sales=("Sales", "sum"),
-                    Cost=("Cost", "sum"),
-                    Gross_Profit=("Gross_Profit", "sum"),
-                    Units=("Units", "sum"),
-                    Unique_Products=("Product Name", "nunique")
-                )
+            visible_product_names = set(
+                filtered["Product Name"].astype(str).str.strip()
             )
 
-            # Product-level factory reports are full-dataset summaries.
-            # To keep all sidebar filters accurate, recompute from transactions.
-            product_factory_map = (
-                factory_mapping[["Product Name", "Factory", "Latitude", "Longitude"]]
-                .drop_duplicates("Product Name")
-                if factory_mapping is not None
-                else None
-            )
+            visible_factory_products = factory_products[
+                factory_products["Product Name"].astype(str).str.strip().isin(
+                    visible_product_names
+                )
+            ].copy()
 
+            product_factory_map = None
+
+            if factory_mapping is not None and {
+                "Product Name", "Factory"
+            }.issubset(factory_mapping.columns):
+                map_columns = [
+                    col for col in ["Product Name", "Factory", "Latitude", "Longitude"]
+                    if col in factory_mapping.columns
+                ]
+                product_factory_map = (
+                    factory_mapping[map_columns]
+                    .drop_duplicates("Product Name")
+                )
+
+            # Prefer current transaction data plus mapping so all filters work.
             if product_factory_map is not None:
                 factory_transactions = filtered.merge(
                     product_factory_map,
@@ -831,10 +793,13 @@ with tab5:
                     validate="many_to_one"
                 )
 
+                grouping_columns = ["Factory"]
+                for col in ["Latitude", "Longitude"]:
+                    if col in factory_transactions.columns:
+                        grouping_columns.append(col)
+
                 factory_view = (
-                    factory_transactions.groupby(
-                        ["Factory", "Latitude", "Longitude"], as_index=False
-                    )
+                    factory_transactions.groupby(grouping_columns, as_index=False)
                     .agg(
                         Sales=("Sales", "sum"),
                         Cost=("Cost", "sum"),
@@ -844,120 +809,9 @@ with tab5:
                     )
                 )
 
-            factory_view["Gross Margin %"] = (
-                factory_view["Gross_Profit"] / factory_view["Sales"] * 100
-            )
-            factory_view["Cost Ratio %"] = (
-                factory_view["Cost"] / factory_view["Sales"] * 100
-            )
-            factory_view["Profit Per Unit"] = (
-                factory_view["Gross_Profit"] / factory_view["Units"]
-            )
-
-            visible_sales = factory_view["Sales"].sum()
-            visible_profit = factory_view["Gross_Profit"].sum()
-
-            factory_view["Revenue Contribution %"] = (
-                factory_view["Sales"] / visible_sales * 100
-                if visible_sales else 0
-            )
-            factory_view["Profit Contribution %"] = (
-                factory_view["Gross_Profit"] / visible_profit * 100
-                if visible_profit else 0
-            )
-
-            f1, f2, f3, f4 = st.columns(4)
-            f1.metric("Mapped Factories", f"{len(factory_view)}")
-            f2.metric("Mapped Sales", f"${visible_sales:,.2f}")
-            f3.metric("Mapped Gross Profit", f"${visible_profit:,.2f}")
-            overall_factory_margin = (
-                visible_profit / visible_sales * 100 if visible_sales else 0
-            )
-            f4.metric("Mapped Gross Margin", f"{overall_factory_margin:.2f}%")
-
-            st.markdown("### Factory-wise Sales vs Gross Profit")
-
-            fig, ax = plt.subplots(figsize=(10, 5))
-            x = range(len(factory_view))
-            width = 0.38
-            ax.bar(
-                [i - width / 2 for i in x],
-                factory_view["Sales"],
-                width=width,
-                label="Sales"
-            )
-            ax.bar(
-                [i + width / 2 for i in x],
-                factory_view["Gross_Profit"],
-                width=width,
-                label="Gross Profit"
-            )
-            ax.set_xticks(list(x))
-            ax.set_xticklabels(factory_view["Factory"], rotation=25, ha="right")
-            ax.set_ylabel("Amount ($)")
-            ax.legend()
-            fig.tight_layout()
-            st.pyplot(fig)
-            plt.close(fig)
-
-            st.markdown("### Factory-wise Gross Margin")
-
-            margin_chart = factory_view.sort_values("Gross Margin %")
-            fig, ax = plt.subplots(figsize=(9, 4))
-            ax.barh(margin_chart["Factory"], margin_chart["Gross Margin %"])
-            ax.set_xlabel("Gross Margin (%)")
-            fig.tight_layout()
-            st.pyplot(fig)
-            plt.close(fig)
-
-            st.markdown("### Factory Performance Summary")
-            st.dataframe(
-                factory_view.sort_values("Gross_Profit", ascending=False).style.format({
-                    "Sales": "${:,.2f}",
-                    "Cost": "${:,.2f}",
-                    "Gross_Profit": "${:,.2f}",
-                    "Units": "{:,.0f}",
-                    "Gross Margin %": "{:.2f}%",
-                    "Cost Ratio %": "{:.2f}%",
-                    "Profit Per Unit": "${:,.2f}",
-                    "Revenue Contribution %": "{:.2f}%",
-                    "Profit Contribution %": "{:.2f}%"
-                }),
-                use_container_width=True,
-                hide_index=True
-            )
-
-            st.markdown("### Product-to-Factory Mapping")
-
-            if factory_mapping is not None:
-                visible_mapping = factory_mapping[
-                    factory_mapping["Product Name"].astype(str).str.strip().isin(
-                        visible_product_names
-                    )
-                ].copy()
-
-                st.dataframe(
-                    visible_mapping,
-                    use_container_width=True,
-                    hide_index=True
-                )
-
-            st.markdown("### Product-level Factory Performance")
-
-            product_view = visible_factory_products.copy()
-
-            # Use current filtered transactions when available
-            if product_factory_map is not None:
                 product_view = (
-                    filtered.merge(
-                        product_factory_map,
-                        on="Product Name",
-                        how="inner",
-                        validate="many_to_one"
-                    )
-                    .groupby(
-                        ["Factory", "Product Name", "Latitude", "Longitude"],
-                        as_index=False
+                    factory_transactions.groupby(
+                        grouping_columns + ["Product Name"], as_index=False
                     )
                     .agg(
                         Sales=("Sales", "sum"),
@@ -967,58 +821,178 @@ with tab5:
                     )
                 )
 
-                product_view["Gross Margin %"] = (
-                    product_view["Gross_Profit"] / product_view["Sales"] * 100
-                )
-                product_view["Profit Per Unit"] = (
-                    product_view["Gross_Profit"] / product_view["Units"]
-                )
-
-            st.dataframe(
-                product_view.sort_values("Gross_Profit", ascending=False).style.format({
-                    "Sales": "${:,.2f}",
-                    "Cost": "${:,.2f}",
-                    "Gross_Profit": "${:,.2f}",
-                    "Units": "{:,.0f}",
-                    "Gross Margin %": "{:.2f}%",
-                    "Profit Per Unit": "${:,.2f}"
-                }),
-                use_container_width=True,
-                hide_index=True
-            )
-
-        if coverage is not None:
-            st.markdown("### Factory Mapping Coverage")
-            st.dataframe(
-                coverage.style.format({
-                    "Mapped_Sales": "${:,.2f}",
-                    "Total_Sales": "${:,.2f}",
-                    "Sales_Mapping_Coverage_%": "{:.2f}%",
-                    "Mapped_Gross_Profit": "${:,.2f}",
-                    "Total_Gross_Profit": "${:,.2f}",
-                    "Profit_Mapping_Coverage_%": "{:.2f}%"
-                }),
-                use_container_width=True,
-                hide_index=True
-            )
-
-        if unmatched_products is not None:
-            st.markdown("### Unmatched Products")
-            if unmatched_products.empty:
-                st.success("Factory mapping report ke mutabik koi unmatched product nahi hai.")
             else:
-                st.warning("Kuch products ko factory assign nahi ki gayi.")
-                st.dataframe(
-                    unmatched_products,
-                    use_container_width=True,
-                    hide_index=True
+                # Fallback: use the precomputed reports if mapping file is absent.
+                factory_view = (
+                    visible_factory_products.groupby("Factory", as_index=False)
+                    .agg(
+                        Sales=("Sales", "sum"),
+                        Gross_Profit=("Gross_Profit", "sum"),
+                        Unique_Products=("Product Name", "nunique")
+                    )
+                )
+                product_view = visible_factory_products.copy()
+                st.warning(
+                    "Mapping file load nahi hui. Factory metrics precomputed report se dikh rahe hain."
                 )
 
-        st.info(
-            "Factory assignment supplied mapping par based hai. Coordinates factory "
-            "locations ko represent karte hain; is analysis se production capacity, "
-            "actual shipping route ya delivery efficiency prove nahi hoti."
-        )
+            if factory_view.empty:
+                st.warning(
+                    "Selected filters ke products factory mapping report mein nahi mile."
+                )
+            else:
+                if "Cost" not in factory_view.columns:
+                    factory_view["Cost"] = (
+                        factory_view["Sales"] - factory_view["Gross_Profit"]
+                    )
+
+                if "Units" not in factory_view.columns:
+                    factory_view["Units"] = 0
+
+                if "Unique_Products" not in factory_view.columns:
+                    factory_view["Unique_Products"] = 0
+
+                factory_view["Gross Margin %"] = (
+                    factory_view["Gross_Profit"] / factory_view["Sales"] * 100
+                )
+                factory_view["Cost Ratio %"] = (
+                    factory_view["Cost"] / factory_view["Sales"] * 100
+                )
+                factory_view["Profit Per Unit"] = factory_view.apply(
+                    lambda r: r["Gross_Profit"] / r["Units"] if r["Units"] else 0,
+                    axis=1
+                )
+
+                visible_sales = factory_view["Sales"].sum()
+                visible_profit = factory_view["Gross_Profit"].sum()
+
+                factory_view["Revenue Contribution %"] = (
+                    factory_view["Sales"] / visible_sales * 100
+                    if visible_sales else 0
+                )
+                factory_view["Profit Contribution %"] = (
+                    factory_view["Gross_Profit"] / visible_profit * 100
+                    if visible_profit else 0
+                )
+
+                f1, f2, f3, f4 = st.columns(4)
+                f1.metric("Mapped Factories", len(factory_view))
+                f2.metric("Mapped Sales", f"${visible_sales:,.2f}")
+                f3.metric("Mapped Gross Profit", f"${visible_profit:,.2f}")
+                f4.metric(
+                    "Mapped Gross Margin",
+                    f"{visible_profit / visible_sales * 100:.2f}%"
+                    if visible_sales else "0.00%"
+                )
+
+                st.markdown("### Factory-wise Sales vs Gross Profit")
+                chart = factory_view.sort_values("Sales", ascending=False)
+                fig, ax = plt.subplots(figsize=(10, 5))
+                x = range(len(chart))
+                width = 0.38
+                ax.bar(
+                    [i - width / 2 for i in x], chart["Sales"],
+                    width=width, label="Sales"
+                )
+                ax.bar(
+                    [i + width / 2 for i in x], chart["Gross_Profit"],
+                    width=width, label="Gross Profit"
+                )
+                ax.set_xticks(list(x))
+                ax.set_xticklabels(chart["Factory"], rotation=25, ha="right")
+                ax.set_ylabel("Amount ($)")
+                ax.legend()
+                fig.tight_layout()
+                st.pyplot(fig)
+                plt.close(fig)
+
+                st.markdown("### Factory-wise Gross Margin")
+                margin_chart = factory_view.sort_values("Gross Margin %")
+                fig, ax = plt.subplots(figsize=(9, 4))
+                ax.barh(margin_chart["Factory"], margin_chart["Gross Margin %"])
+                ax.set_xlabel("Gross Margin (%)")
+                fig.tight_layout()
+                st.pyplot(fig)
+                plt.close(fig)
+
+                st.markdown("### Factory Performance Summary")
+                st.dataframe(
+                    factory_view.sort_values(
+                        "Gross_Profit", ascending=False
+                    ).style.format({
+                        "Sales": "${:,.2f}", "Cost": "${:,.2f}",
+                        "Gross_Profit": "${:,.2f}", "Units": "{:,.0f}",
+                        "Gross Margin %": "{:.2f}%", "Cost Ratio %": "{:.2f}%",
+                        "Profit Per Unit": "${:,.2f}",
+                        "Revenue Contribution %": "{:.2f}%",
+                        "Profit Contribution %": "{:.2f}%"
+                    }),
+                    width="stretch", hide_index=True
+                )
+
+                st.markdown("### Product-to-Factory Mapping")
+                if factory_mapping is not None:
+                    if "Product Name" in factory_mapping.columns:
+                        visible_mapping = factory_mapping[
+                            factory_mapping["Product Name"].astype(str).str.strip().isin(
+                                visible_product_names
+                            )
+                        ].copy()
+                        st.dataframe(
+                            visible_mapping, width="stretch", hide_index=True
+                        )
+                    else:
+                        st.warning("Factory mapping report mein Product Name column nahi hai.")
+
+                st.markdown("### Product-level Factory Performance")
+                if "Gross_Profit" in product_view.columns:
+                    product_view = product_view.copy()
+
+                    if "Sales" in product_view.columns:
+                        product_view["Gross Margin %"] = (
+                            product_view["Gross_Profit"] / product_view["Sales"] * 100
+                        )
+
+                    if "Units" in product_view.columns:
+                        product_view["Profit Per Unit"] = product_view.apply(
+                            lambda r: r["Gross_Profit"] / r["Units"]
+                            if r["Units"] else 0,
+                            axis=1
+                        )
+
+                    st.dataframe(
+                        product_view.sort_values(
+                            "Gross_Profit", ascending=False
+                        ).style.format({
+                            "Sales": "${:,.2f}", "Cost": "${:,.2f}",
+                            "Gross_Profit": "${:,.2f}", "Units": "{:,.0f}",
+                            "Gross Margin %": "{:.2f}%",
+                            "Profit Per Unit": "${:,.2f}"
+                        }),
+                        width="stretch", hide_index=True
+                    )
+                else:
+                    st.warning(
+                        "Product-level report mein Gross_Profit column nahi mila."
+                    )
+
+    if coverage is not None:
+        st.markdown("### Factory Mapping Coverage")
+        st.dataframe(coverage, width="stretch", hide_index=True)
+
+    if unmatched_products is not None:
+        st.markdown("### Unmatched Products")
+        if unmatched_products.empty:
+            st.success("Factory mapping report ke mutabik koi unmatched product nahi hai.")
+        else:
+            st.warning("Kuch products ko factory assign nahi ki gayi.")
+            st.dataframe(unmatched_products, width="stretch", hide_index=True)
+
+    st.info(
+        "Factory assignment supplied mapping par based hai. Coordinates factory "
+        "locations ko represent karte hain; is analysis se production capacity, "
+        "actual shipping route ya delivery efficiency prove nahi hoti."
+    )
 
 
 # ==========================================================
@@ -1030,8 +1004,7 @@ with tab6:
 
     st.dataframe(
         filtered.drop(columns=["Order Month"], errors="ignore"),
-        use_container_width=True,
-        hide_index=True
+        width="stretch", hide_index=True
     )
 
     transaction_csv = filtered.to_csv(index=False).encode("utf-8")
@@ -1083,20 +1056,11 @@ with tab6:
     st.write("- Gross Margin = Gross Profit / Sales × 100.")
     st.write("- Cost Ratio = Cost / Sales × 100.")
     st.write("- Profit per Unit = Gross Profit / Units.")
-    st.write(
-        "- Product contribution percentages are calculated against the currently "
-        "filtered product set."
-    )
+    st.write("- Product contribution percentages are calculated against the currently filtered product set.")
     st.write("- Invalid or incomplete financial records are excluded.")
     st.write("- Gross profit was validated separately against Sales minus Cost.")
-    st.write(
-        "- Gross profit is not necessarily net profit; source Cost field coverage "
-        "should be confirmed."
-    )
-    st.write(
-        "- Shipping efficiency is not evaluated because date fields require "
-        "verification."
-    )
+    st.write("- Gross profit is not necessarily net profit; source Cost field coverage should be confirmed.")
+    st.write("- Shipping efficiency is not evaluated because date fields require verification.")
 
 
 # ==========================================================
